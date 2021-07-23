@@ -1,0 +1,124 @@
+---
+title: "Agriculture"
+author: "Brian Colgrove"
+date: "4/8/2021"
+output: html_document
+---
+
+
+```{r}
+#packages
+library(gstat)
+library(tidyverse)
+library(corrplot)
+library(lmtest)
+library(multcomp)
+library(nlme)
+library(DataExplorer)
+library(sf)
+library(maps)
+library(mapproj)
+library(ggmap)
+library(car)
+source("stdres.R")
+source("predictgls.R")
+
+
+#read in the data
+agriculture <- read.table("https://mheaton.byu.edu/docs/files/Stat469/Topics/3%20-%20SpatialCorrelation/1%20-%20PointReference/HWCaseStudy/Data/WaterHoldingCapacity.txt", header = TRUE, sep = " ")
+
+#summarize the data
+head(agriculture)
+summary(agriculture)
+```
+
+
+```{r}
+#scatter plot Yield vs WHC
+ggplot(agriculture, aes(x = Yield, y = WHC)) +
+  geom_point()
+
+#scatter plot EC vs WHC
+ggplot(agriculture, aes(x = EC, y = WHC)) +
+  geom_point()
+```
+There seems to be a positive linear relationship between Yield and WHC and also EC and WHC. 
+
+
+```{r}
+#lm model
+agriculture.lm <- lm(WHC~EC + Yield, data = agriculture)
+plot(agriculture.lm$fitted, agriculture.lm$residuals)
+
+#variogram
+data_omit <- na.omit(agriculture)
+myVariogram <- variogram(object=WHC~EC + Yield, locations=~Lon+Lat, data=data_omit)
+plot(myVariogram)
+
+#residual plot
+ggplot() + geom_tile(aes(x=data_omit$Lon, y=data_omit$Lat, fill=agriculture.lm$residuals)) + scale_fill_distiller(palette="Spectral")
+```
+There seems to be spatial correlation for both residual and variogram graphs. The residual one gets higher values the further North East you go. The variogram shows smaller variance at smaller distance. 
+
+
+```{r}
+#gls model
+agriculture.gls <- gls(model=WHC~EC+Yield, data=data_omit, correlation=corExp(form=~Lon+Lat, nugget=TRUE), method="ML", na.action = na.omit)
+
+agriculture.gls2 <- gls(WHC~Yield+EC, data=data_omit, correlation=corSpher(form=~Lon+Lat, nugget=TRUE), method="ML")
+
+agriculture.gls3 <- gls(WHC~Yield+EC, data=data_omit, correlation=corGaus(form=~Lon+Lat, nugget=TRUE), method="ML")
+
+c(AIC(agriculture.gls), AIC(agriculture.gls2), AIC(agriculture.gls3))
+
+
+
+```
+The exponential correlation gls model is just barely better than the other two according to its AIC values. 
+
+
+```{r}
+#linearity
+avPlots(agriculture.lm)
+
+#decorrelated residuals
+decorResids <- stdres.gls(agriculture.gls)
+
+#variogram of decorrelated residuals
+residDF <- data.frame(Lon=data_omit$Lon, Lat=data_omit$Lat, decorrResid=decorResids)
+residVariogram <- variogram(object=decorrResid~1, locations=~Lon+Lat, data=residDF)
+plot(residVariogram)
+
+#normality
+hist(decorResids)
+
+#residual plot
+ggplot() + geom_tile(aes(x=data_omit$Lon, y=data_omit$Lat, fill=decorResids)) + scale_fill_distiller(palette="Spectral")
+```
+AV plots are linear, the histogram is normal, the variogram shows a more constant variance along the distances, the residual plot shows pretty good values across the map. No patterns. All assumptions are met.  
+
+
+```{r}
+#table
+summary(agriculture.gls)$tTable
+
+#confidence interval
+intervals(agriculture.gls, which="coef")
+
+#na predictions
+vec <- which(is.na(agriculture$WHC))
+na_data <- agriculture[vec,c(1:4) ]
+
+#na.preds <- predict(temp.lm, newdata=na_data)
+na.preds <- predictgls(agriculture.gls, newdframe = na_data)
+
+#map predictions
+colnames(na.preds)[5] <- "WHC"
+full <- rbind(na.preds[1:5], data_omit )
+mymap <- get_stamenmap(bbox = c(left = min(full$Lon), bottom = min(full$Lat), right =
+  max(full$Lon), top =  max(full$Lat)), zoom=7, maptype="watercolor")
+ggmap(mymap)+geom_raster(data=full, aes(x=Lon, y=Lat, fill=WHC),  alpha=0.8)+ 
+  geom_tile()+ scale_fill_distiller(palette="Spectral", na.value=NA) + coord_cartesian()
+```
+From our hypothesis test it does seem like that higher yield areas increase with higher WHC since our p-value is 0.00778. We are 95% confident that WHC increases per 1 unit of Yield is between 0.006, 0.045. 
+
